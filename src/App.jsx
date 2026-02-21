@@ -10,6 +10,7 @@ import {
   serverTimestamp,
   doc,
   setDoc,
+  getDoc,
   updateDoc,
   writeBatch
 } from 'firebase/firestore';
@@ -20,9 +21,9 @@ import {
   onAuthStateChanged,
   signOut
 } from 'firebase/auth';
-import { Send, User, MessageCircle, LogIn, Hash, ShieldCheck, Clock, UserPlus, CheckCircle, XCircle, Reply, Check, CheckCheck, LogOut } from 'lucide-react';
+import { Send, User, ShieldCheck, Clock, CheckCircle, Reply, Check, CheckCheck, LogOut, MessageSquare, UserPlus } from 'lucide-react';
 
-// --- Production Firebase Configuration ---
+// --- Firebase Configuration ---
 const firebaseConfig = {
   apiKey: "AIzaSyDiZJ8_L_qCUYdsTnDNRwOrofuVkWUbml4",
   authDomain: "kwite-e2c9a.firebaseapp.com",
@@ -37,7 +38,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const appId = 'kwite-chat-v1';
 
-// Helper to map username to a unique internal email for Firebase Auth
+// Internal helper for Auth email
 const formatEmail = (uname) => `${uname.toLowerCase().trim()}@kwite.chat`;
 
 export default function App() {
@@ -46,10 +47,10 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [replyTo, setReplyTo] = useState(null);
-  const [targetUserId, setTargetUserId] = useState('Global-Lobby');
+  const [targetUsername, setTargetUsername] = useState(null); 
   const [targetUserProfile, setTargetUserProfile] = useState(null);
   const [view, setView] = useState('loading'); 
-  const [pendingUsers, setPendingUsers] = useState([]);
+  const [availableUsers, setAvailableUsers] = useState([]);
   
   // Auth Form State
   const [username, setUsername] = useState('');
@@ -59,101 +60,102 @@ export default function App() {
 
   const scrollRef = useRef(null);
 
-  // 1. Authentication and Profile Sync
+  // Helper to format the timestamp intelligently
+  const formatMessageTime = (timestamp) => {
+    if (!timestamp) return "sending...";
+    const date = timestamp.toDate();
+    const now = new Date();
+    const isToday = date.toDateString() === now.toDateString();
+    
+    const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (isToday) return timeStr;
+    
+    return `${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${timeStr}`;
+  };
+
+  // 1. Auth & Profile Management
   useEffect(() => {
     const unsubscribeAuth = onAuthStateChanged(auth, async (currUser) => {
       if (currUser) {
         setUser(currUser);
         const profileRef = doc(db, 'artifacts', appId, 'users', currUser.uid, 'profile', 'data');
         
-        // Mark Online
-        updateDoc(profileRef, { 
-          isOnline: true, 
-          lastSeen: serverTimestamp() 
-        }).catch(() => {});
-
-        const unsubProfile = onSnapshot(profileRef, (docSnap) => {
+        onSnapshot(profileRef, (docSnap) => {
           if (docSnap.exists()) {
             const data = docSnap.data();
             setUserProfile(data);
-            if (data.isAdmin) setView('admin');
-            else if (data.status === 'approved') setView('chat');
-            else setView('pending');
+            if (data.isAdmin || data.status === 'approved') {
+              setView('chat');
+              if (!data.isAdmin) fetchAdminInfo();
+            } else {
+              setView('pending');
+            }
           } else {
             setView('login');
           }
-        }, () => setView('login'));
-
-        return () => {
-          unsubProfile();
-          updateDoc(profileRef, { isOnline: false, lastSeen: serverTimestamp() }).catch(() => {});
-        };
+        });
       } else {
         setUser(null);
-        setUserProfile(null);
         setView('login');
       }
     });
-
     return () => unsubscribeAuth();
   }, []);
 
-  // 2. Presence Tracking for Chat Partner
-  useEffect(() => {
-    if (!user || targetUserId === 'Global-Lobby') {
-      setTargetUserProfile(null);
-      return;
-    }
-    const targetRef = doc(db, 'artifacts', appId, 'public', 'data', 'all_users', targetUserId);
-    return onSnapshot(targetRef, (docSnap) => {
-      if (docSnap.exists()) setTargetUserProfile(docSnap.data());
+  const fetchAdminInfo = async () => {
+    const usersRef = collection(db, 'artifacts', appId, 'public', 'data', 'all_users');
+    onSnapshot(usersRef, (snapshot) => {
+      const adminDoc = snapshot.docs.find(d => d.data().isAdmin === true);
+      if (adminDoc) {
+        setTargetUsername(adminDoc.id); 
+        setTargetUserProfile(adminDoc.data());
+      }
     });
-  }, [user, targetUserId]);
+  };
 
-  // 3. Admin: Load Pending Users
+  // 2. Admin Logic: Fetch all users based on Username ID
   useEffect(() => {
     if (userProfile?.isAdmin && user) {
       const usersRef = collection(db, 'artifacts', appId, 'public', 'data', 'all_users');
       return onSnapshot(usersRef, (snapshot) => {
-        const users = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        setPendingUsers(users.filter(u => u.status === 'pending'));
+        const users = snapshot.docs.map(doc => ({ usernameId: doc.id, ...doc.data() }));
+        setAvailableUsers(users.filter(u => u.usernameId !== userProfile.username.toLowerCase()));
       });
     }
   }, [userProfile, user]);
 
-  // 4. Chat Engine: Messages and Read Status
+  // 3. Chat Logic
   useEffect(() => {
-    if (!user || (view !== 'chat' && view !== 'admin')) return;
+    if (!user || !userProfile || !targetUsername || view !== 'chat') return;
 
     const messagesRef = collection(db, 'artifacts', appId, 'public', 'data', 'messages');
     const q = query(messagesRef, orderBy('timestamp', 'asc'));
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const msgs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const myUsername = userProfile.username.toLowerCase();
+      const theirUsername = targetUsername.toLowerCase();
+
       const filtered = msgs.filter(m => 
-        (m.senderId === user.uid && m.receiverId === targetUserId) ||
-        (m.senderId === targetUserId && m.receiverId === user.uid) ||
-        (targetUserId === 'Global-Lobby' && m.receiverId === 'Global-Lobby')
+        (m.senderUsername === myUsername && m.receiverUsername === theirUsername) ||
+        (m.senderUsername === theirUsername && m.receiverUsername === myUsername)
       );
       setMessages(filtered);
 
-      // Mark as read logic
-      if (targetUserId !== 'Global-Lobby') {
-        const batch = writeBatch(db);
-        let hasUpdates = false;
-        snapshot.docs.forEach(docSnap => {
-          const data = docSnap.data();
-          if (data.receiverId === user.uid && data.senderId === targetUserId && !data.read) {
-            batch.update(docSnap.ref, { read: true, readAt: serverTimestamp() });
-            hasUpdates = true;
-          }
-        });
-        if (hasUpdates) batch.commit().catch(() => {});
-      }
+      const batch = writeBatch(db);
+      let hasUpdates = false;
+      snapshot.docs.forEach(docSnap => {
+        const data = docSnap.data();
+        if (data.receiverUsername === myUsername && data.senderUsername === theirUsername && !data.read) {
+          batch.update(docSnap.ref, { read: true, readAt: serverTimestamp() });
+          hasUpdates = true;
+        }
+      });
+      if (hasUpdates) batch.commit().catch(() => {});
     });
 
     return () => unsubscribe();
-  }, [user, targetUserId, view]);
+  }, [user, userProfile, targetUsername, view]);
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -163,24 +165,37 @@ export default function App() {
 
   const handleRegister = async (e) => {
     e.preventDefault();
-    if (!username || !password || password.length < 6) return setError("Min 6 chars for password.");
+    const cleanUsername = username.toLowerCase().trim();
+    if (!cleanUsername || !password || password.length < 6) return setError("Min 6 chars.");
+    
     setLoading(true);
     setError("");
+
     try {
-      const cred = await createUserWithEmailAndPassword(auth, formatEmail(username), password);
+      const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'all_users', cleanUsername);
+      const userSnap = await getDoc(userRef);
+      
+      if (userSnap.exists()) {
+        setLoading(false);
+        return setError("Username already taken.");
+      }
+
+      const isFirstAdmin = cleanUsername === 'admin';
+      const cred = await createUserWithEmailAndPassword(auth, formatEmail(cleanUsername), password);
+      
       const profileData = {
         username: username,
-        status: 'pending',
+        status: isFirstAdmin ? 'approved' : 'pending',
         uid: cred.user.uid,
-        isAdmin: username.toLowerCase() === 'admin', 
-        createdAt: new Date().toISOString(),
-        isOnline: true,
-        lastSeen: serverTimestamp()
+        isAdmin: isFirstAdmin, 
+        createdAt: new Date().toISOString()
       };
+
       await setDoc(doc(db, 'artifacts', appId, 'users', cred.user.uid, 'profile', 'data'), profileData);
-      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'all_users', cred.user.uid), profileData);
+      await setDoc(userRef, profileData);
+      
     } catch (err) {
-      setError(err.code === 'auth/email-already-in-use' ? "Username taken." : "Registration error.");
+      setError("Error creating account. Try again.");
     } finally {
       setLoading(false);
     }
@@ -188,13 +203,12 @@ export default function App() {
 
   const handleLogin = async (e) => {
     e.preventDefault();
-    if (!username || !password) return setError("Enter credentials.");
     setLoading(true);
     setError("");
     try {
       await signInWithEmailAndPassword(auth, formatEmail(username), password);
     } catch (err) {
-      setError("Invalid username or password.");
+      setError("Invalid credentials.");
     } finally {
       setLoading(false);
     }
@@ -202,51 +216,59 @@ export default function App() {
 
   const handleSendMessage = async (e) => {
     e.preventDefault();
-    if (!newMessage.trim() || !user) return;
+    if (!newMessage.trim() || !user || !userProfile || !targetUsername) return;
     try {
       await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'messages'), {
         text: newMessage,
-        senderId: user.uid,
-        receiverId: targetUserId,
-        senderName: userProfile?.username || 'User',
+        senderUsername: userProfile.username.toLowerCase(),
+        receiverUsername: targetUsername.toLowerCase(),
+        senderDisplayName: userProfile.username,
         timestamp: serverTimestamp(),
         read: false,
-        replyTo: replyTo ? { text: replyTo.text, senderName: replyTo.senderName } : null
+        replyTo: replyTo ? { text: replyTo.text, senderName: replyTo.senderDisplayName } : null
       });
       setNewMessage('');
       setReplyTo(null);
     } catch (e) {}
   };
 
-  const approveUser = async (targetUid) => {
-    const pubRef = doc(db, 'artifacts', appId, 'public', 'data', 'all_users', targetUid);
+  const approveUser = async (targetUnameId, targetUid) => {
+    const pubRef = doc(db, 'artifacts', appId, 'public', 'data', 'all_users', targetUnameId);
     const privRef = doc(db, 'artifacts', appId, 'users', targetUid, 'profile', 'data');
     await updateDoc(pubRef, { status: 'approved' });
     await updateDoc(privRef, { status: 'approved' });
   };
 
-  if (view === 'loading') return <div className="h-screen bg-slate-950 flex items-center justify-center text-blue-500">Loading...</div>;
+  if (view === 'loading') return <div className="h-screen bg-slate-50 flex items-center justify-center text-blue-600 font-medium italic tracking-wide">Connecting...</div>;
 
   if (view === 'login' || view === 'register') {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-slate-950 p-4 font-sans">
-        <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl">
+      <div className="flex items-center justify-center min-h-screen bg-slate-50 p-4 font-sans">
+        <div className="w-full max-w-md bg-white border border-slate-200 rounded-3xl p-8 shadow-xl">
           <div className="flex justify-center mb-6">
-            <div className="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center shadow-lg shadow-blue-500/20">
+            <div className="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center shadow-lg shadow-blue-200">
               <ShieldCheck className="text-white" size={32} />
             </div>
           </div>
-          <h1 className="text-2xl font-bold text-center text-white mb-6 uppercase tracking-widest">{view === 'login' ? 'Kwite Chat Login' : 'Create Account'}</h1>
+          <h1 className="text-2xl font-bold text-center text-slate-800 mb-6 tracking-tight">
+            {view === 'login' ? 'Kwite Chat' : 'Create Account'}
+          </h1>
           <form onSubmit={view === 'login' ? handleLogin : handleRegister} className="space-y-4">
-            <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3.5 text-white focus:ring-2 focus:ring-blue-500/50 outline-none" placeholder="Username" />
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3.5 text-white focus:ring-2 focus:ring-blue-500/50 outline-none" placeholder="Password" />
-            {error && <p className="text-red-400 text-xs text-center font-bold bg-red-400/10 py-2 rounded-lg">{error}</p>}
-            <button disabled={loading} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-black py-4 rounded-xl transition-all shadow-lg shadow-blue-600/20 uppercase">
-              {loading ? '...' : (view === 'login' ? 'Sign In' : 'Join Now')}
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-500 uppercase px-1 tracking-wider">Username</label>
+              <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3.5 text-slate-800 focus:ring-2 focus:ring-blue-500/20 outline-none transition-all" placeholder="Enter username" />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-500 uppercase px-1 tracking-wider">Password</label>
+              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3.5 text-slate-800 focus:ring-2 focus:ring-blue-500/20 outline-none transition-all" placeholder="••••••••" />
+            </div>
+            {error && <p className="text-red-500 text-xs text-center font-bold bg-red-50 py-2 rounded-lg border border-red-100">{error}</p>}
+            <button disabled={loading} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-blue-100 uppercase">
+              {loading ? 'Processing...' : (view === 'login' ? 'Sign In' : 'Join Now')}
             </button>
           </form>
-          <button onClick={() => { setView(view === 'login' ? 'register' : 'login'); setError(""); }} className="w-full mt-6 text-sm text-slate-500 hover:text-blue-400 font-bold">
-            {view === 'login' ? "Register New Account" : "Back to Login"}
+          <button onClick={() => { setView(view === 'login' ? 'register' : 'login'); setError(""); }} className="w-full mt-6 text-sm text-slate-400 hover:text-blue-600 font-medium transition-colors">
+            {view === 'login' ? "Register a new account" : "Already have an account? Sign In"}
           </button>
         </div>
       </div>
@@ -255,101 +277,179 @@ export default function App() {
 
   if (view === 'pending') {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-slate-950 p-4 text-center">
-        <div className="max-w-md bg-slate-900 border border-slate-800 p-10 rounded-3xl shadow-xl">
-          <Clock className="w-16 h-16 text-yellow-500 mx-auto mb-6 animate-pulse" />
-          <h1 className="text-2xl font-bold text-white mb-2 tracking-tight">Access Restricted</h1>
-          <p className="text-slate-400 text-sm leading-relaxed mb-8">@{userProfile?.username}, your account is in the queue. An admin will grant you access soon. Please check back later.</p>
-          <button onClick={() => signOut(auth)} className="text-slate-500 hover:text-red-400 font-bold text-sm uppercase">Sign Out</button>
+      <div className="flex items-center justify-center min-h-screen bg-slate-50 p-4 text-center">
+        <div className="max-w-md bg-white border border-slate-200 p-10 rounded-3xl shadow-lg">
+          <div className="w-20 h-20 bg-amber-50 rounded-full flex items-center justify-center mx-auto mb-6 text-amber-500">
+            <Clock className="w-10 h-10 animate-pulse" />
+          </div>
+          <h1 className="text-2xl font-bold text-slate-800 mb-2">Approval Required</h1>
+          <p className="text-slate-500 text-sm mb-8 leading-relaxed">
+            Your account <b>@{userProfile?.username}</b> has been registered. Please wait for an administrator to grant you access.
+          </p>
+          <button onClick={() => signOut(auth)} className="text-slate-400 hover:text-red-500 font-bold text-sm uppercase tracking-widest transition-colors">Log Out</button>
         </div>
       </div>
     );
   }
 
+  const pendingRequests = availableUsers.filter(u => u.status === 'pending');
+  const activeChats = availableUsers.filter(u => u.status === 'approved');
+
   return (
-    <div className="flex h-screen bg-slate-950 text-slate-100 font-sans overflow-hidden">
-      {/* Sidebar */}
-      <aside className="hidden md:flex flex-col w-72 bg-slate-900 border-r border-slate-800">
-        <div className="p-6 border-b border-slate-800 bg-slate-900/50 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className={`w-10 h-10 rounded-full flex items-center justify-center ${userProfile?.isAdmin ? 'bg-purple-600' : 'bg-blue-600'}`}><User size={20} /></div>
+    <div className="flex h-screen bg-white text-slate-800 font-sans overflow-hidden">
+      <aside className="hidden md:flex flex-col w-80 bg-slate-50 border-r border-slate-200">
+        <div className="p-6 border-b border-slate-200 flex items-center justify-between bg-white">
+          <div className="flex items-center gap-3 overflow-hidden">
+            <div className={`shrink-0 w-10 h-10 rounded-xl flex items-center justify-center text-white shadow-sm ${userProfile?.isAdmin ? 'bg-indigo-600' : 'bg-blue-600'}`}>
+              <User size={20} />
+            </div>
             <div className="overflow-hidden">
-              <p className="text-sm font-black truncate">@{userProfile?.username}</p>
-              <p className="text-[10px] text-green-500 font-bold uppercase tracking-widest">Active</p>
+              <p className="text-sm font-bold truncate">@{userProfile?.username}</p>
+              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-tighter">
+                {userProfile?.isAdmin ? 'Administrator' : 'User Session'}
+              </p>
             </div>
           </div>
-          <button onClick={() => signOut(auth)} className="text-slate-500 hover:text-red-400"><LogOut size={18} /></button>
+          <button onClick={() => signOut(auth)} className="text-slate-300 hover:text-red-500 transition-colors ml-2"><LogOut size={18} /></button>
         </div>
-        <div className="flex-1 overflow-y-auto p-4 space-y-1">
-          {userProfile?.isAdmin && (
-            <button onClick={() => setView('admin')} className={`w-full flex items-center justify-between p-3 rounded-xl transition-all mb-6 ${view === 'admin' ? 'bg-purple-600 shadow-lg' : 'hover:bg-slate-800 text-slate-400 font-bold text-sm'}`}>
-              <div className="flex items-center gap-3"><ShieldCheck size={18} /><span>Approvals</span></div>
-              {pendingUsers.length > 0 && <span className="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full">{pendingUsers.length}</span>}
-            </button>
+        
+        <div className="flex-1 overflow-y-auto p-4 space-y-6">
+          {userProfile?.isAdmin && pendingRequests.length > 0 && (
+            <div>
+              <p className="text-[10px] font-black text-amber-600 uppercase tracking-widest px-2 mb-2">New Approvals</p>
+              <div className="space-y-1">
+                {pendingRequests.map(u => (
+                  <div key={u.usernameId} className="flex items-center justify-between p-3 bg-white border border-slate-200 rounded-xl shadow-sm">
+                    <p className="text-xs font-bold text-slate-700 truncate mr-2">@{u.username}</p>
+                    <button onClick={() => approveUser(u.usernameId, u.uid)} className="p-1.5 bg-green-50 text-green-600 hover:bg-green-600 hover:text-white rounded-lg transition-all">
+                      <UserPlus size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
-          <button onClick={() => { setView('chat'); setTargetUserId('Global-Lobby'); }} className={`w-full flex items-center gap-3 p-3 rounded-xl ${targetUserId === 'Global-Lobby' && view === 'chat' ? 'bg-blue-600' : 'hover:bg-slate-800 text-slate-400'}`}>
-            <Hash size={18} /><span className="font-bold text-sm">Global Lobby</span>
-          </button>
+
+          <div>
+            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-2">
+              {userProfile?.isAdmin ? "Direct Chats" : "Contact Admin"}
+            </p>
+            <div className="space-y-1">
+              {userProfile?.isAdmin ? (
+                activeChats.length === 0 ? (
+                  <p className="text-xs text-slate-400 px-2 italic">No active conversations.</p>
+                ) : (
+                  activeChats.map(u => (
+                    <button 
+                      key={u.usernameId} 
+                      onClick={() => { setTargetUsername(u.usernameId); setTargetUserProfile(u); }}
+                      className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all border ${targetUsername === u.usernameId ? 'bg-blue-600 border-blue-600 text-white shadow-md' : 'bg-transparent border-transparent text-slate-500 hover:bg-slate-200'}`}
+                    >
+                      <div className={`shrink-0 w-8 h-8 rounded-lg flex items-center justify-center text-[11px] font-bold ${targetUsername === u.usernameId ? 'bg-blue-500' : 'bg-slate-200'}`}>
+                        {u.username[0].toUpperCase()}
+                      </div>
+                      <div className="text-left overflow-hidden">
+                        <p className={`text-sm font-bold truncate ${targetUsername === u.usernameId ? 'text-white' : 'text-slate-700'}`}>@{u.username}</p>
+                        <p className={`text-[10px] truncate ${targetUsername === u.usernameId ? 'text-blue-100' : 'text-slate-400'}`}>Message user</p>
+                      </div>
+                    </button>
+                  ))
+                )
+              ) : (
+                targetUserProfile && (
+                  <button className="w-full flex items-center gap-3 p-3 rounded-xl bg-blue-600 text-white shadow-lg shadow-blue-100">
+                    <ShieldCheck size={18} />
+                    <div className="text-left">
+                      <p className="font-bold text-sm">Administrator</p>
+                      <p className="text-[10px] text-blue-100 opacity-80 uppercase tracking-tighter">@{targetUserProfile.username}</p>
+                    </div>
+                  </button>
+                )
+              )}
+            </div>
+          </div>
         </div>
       </aside>
 
-      {/* Chat View */}
-      <main className="flex-1 flex flex-col min-w-0 bg-slate-950">
-        {view === 'admin' ? (
-          <div className="flex-1 p-8 overflow-y-auto">
-            <h1 className="text-3xl font-black mb-10 text-purple-400 flex items-center gap-3"><ShieldCheck size={32} /> Dashboard</h1>
-            <div className="grid gap-4 max-w-2xl">
-              {pendingUsers.length === 0 ? <p className="text-slate-500 font-bold italic">No pending requests.</p> : pendingUsers.map(u => (
-                <div key={u.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-6 flex items-center justify-between">
-                  <div className="flex items-center gap-4">
-                    <div className="w-12 h-12 bg-slate-800 rounded-xl flex items-center justify-center text-slate-500 font-bold">{u.username[0].toUpperCase()}</div>
-                    <div><h4 className="font-black text-white">@{u.username}</h4><p className="text-[10px] text-slate-500">{u.uid}</p></div>
-                  </div>
-                  <button onClick={() => approveUser(u.uid)} className="bg-green-500 hover:bg-green-400 text-slate-950 px-5 py-2.5 rounded-xl font-black text-xs uppercase flex items-center gap-2"><CheckCircle size={16} /> Approve</button>
-                </div>
-              ))}
+      <main className="flex-1 flex flex-col min-w-0 bg-white">
+        {!targetUsername ? (
+          <div className="flex-1 flex flex-col items-center justify-center text-slate-300 p-10 text-center">
+            <div className="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mb-4">
+              <MessageSquare size={40} className="opacity-40" />
             </div>
+            <h2 className="text-lg font-bold text-slate-400 italic">Kwite Chat Session</h2>
+            <p className="text-xs max-w-xs leading-relaxed opacity-60">
+              Select a conversation from the sidebar to begin messaging.
+            </p>
           </div>
         ) : (
           <>
-            <header className="h-20 flex items-center px-6 bg-slate-900/50 border-b border-slate-800 gap-4">
-              <div className="w-10 h-10 bg-slate-800 rounded-full flex items-center justify-center text-blue-400"><User size={20} /></div>
-              <div>
-                <h2 className="font-black text-sm uppercase tracking-widest text-white">{targetUserId === 'Global-Lobby' ? 'Global Lobby' : targetUserProfile?.username}</h2>
-                {targetUserId !== 'Global-Lobby' && <p className="text-[10px] font-bold text-slate-500">{targetUserProfile?.isOnline ? <span className="text-green-500">Online Now</span> : 'Last seen recently'}</p>}
+            <header className="h-20 flex items-center px-6 bg-white border-b border-slate-100 gap-4">
+              <div className="w-10 h-10 bg-slate-50 border border-slate-100 rounded-xl flex items-center justify-center text-blue-600 shadow-sm">
+                <User size={20} />
+              </div>
+              <div className="flex-1">
+                <h2 className="font-bold text-slate-800 text-sm">@{targetUserProfile?.username || targetUsername}</h2>
+                <div className="flex items-center gap-1.5">
+                  <div className="w-1.5 h-1.5 rounded-full bg-green-500"></div>
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">Active Connection</p>
+                </div>
               </div>
             </header>
-            <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6">
+
+            <div className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6 bg-slate-50/20">
+              {messages.length === 0 && (
+                <div className="flex flex-col items-center justify-center py-20 text-slate-300">
+                   <div className="p-3 bg-white rounded-xl border border-slate-100 text-[10px] uppercase font-bold tracking-widest shadow-sm">
+                     Start messaging
+                   </div>
+                </div>
+              )}
               {messages.map((msg) => (
-                <div key={msg.id} className={`flex flex-col group ${msg.senderId === user.uid ? 'items-end' : 'items-start'}`}>
-                  <div className="flex items-end gap-2 max-w-[80%]">
-                    {msg.senderId !== user.uid && <div className="w-6 h-6 rounded-full bg-slate-800 flex items-center justify-center text-[8px] font-bold text-slate-500 uppercase">{msg.senderName[0]}</div>}
+                <div key={msg.id} className={`flex flex-col group ${msg.senderUsername === userProfile.username.toLowerCase() ? 'items-end' : 'items-start'}`}>
+                  <div className="flex items-end gap-2 max-w-[85%]">
                     <div className="flex flex-col">
-                      {msg.replyTo && <div className="bg-slate-800/50 border-l-4 border-blue-500 p-2 mb-1 rounded-lg text-xs opacity-60 italic truncate">@{msg.replyTo.senderName}: {msg.replyTo.text}</div>}
-                      <div className={`relative px-4 py-2.5 rounded-2xl text-sm ${msg.senderId === user.uid ? 'bg-blue-600 text-white rounded-tr-none shadow-lg' : 'bg-slate-800 text-slate-100 rounded-tl-none border border-slate-700'}`}>
-                        <p>{msg.text}</p>
-                        <button onClick={() => setReplyTo(msg)} className={`absolute -right-10 top-1/2 -translate-y-1/2 p-2 bg-slate-800 rounded-full opacity-0 group-hover:opacity-100 transition-all ${msg.senderId === user.uid ? '-left-10 right-auto' : ''}`}><Reply size={14} /></button>
+                      {msg.replyTo && (
+                        <div className="bg-white border-l-2 border-blue-400 p-2 mb-1 rounded-lg text-[10px] text-slate-400 italic truncate max-w-[200px] shadow-sm">
+                          {msg.replyTo.text}
+                        </div>
+                      )}
+                      <div className={`relative px-4 py-3 rounded-2xl text-sm shadow-sm ${msg.senderUsername === userProfile.username.toLowerCase() ? 'bg-blue-600 text-white rounded-br-none' : 'bg-white text-slate-700 rounded-bl-none border border-slate-200'}`}>
+                        <p className="leading-relaxed whitespace-pre-wrap">{msg.text}</p>
+                        <button onClick={() => setReplyTo(msg)} className={`absolute -top-2 p-1.5 bg-white border border-slate-200 text-slate-400 rounded-lg opacity-0 group-hover:opacity-100 transition-all shadow-sm hover:text-blue-600 ${msg.senderUsername === userProfile.username.toLowerCase() ? '-left-8' : '-right-8'}`}>
+                          <Reply size={12} />
+                        </button>
                       </div>
                     </div>
                   </div>
-                  <div className="flex items-center gap-1 mt-1 text-[9px] font-bold text-slate-500 uppercase">
-                    {msg.timestamp?.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    {msg.senderId === user.uid && targetUserId !== 'Global-Lobby' && (msg.read ? <CheckCheck size={12} className="text-blue-400" /> : <Check size={12} />)}
+                  {/* Updated Timestamp Display */}
+                  <div className="flex items-center gap-1.5 mt-1.5 px-1 text-[9px] font-bold text-slate-400 uppercase tracking-tight">
+                    {formatMessageTime(msg.timestamp)}
+                    {msg.senderUsername === userProfile.username.toLowerCase() && (msg.read ? <CheckCheck size={12} className="text-blue-500" /> : <Check size={12} />)}
                   </div>
                 </div>
               ))}
               <div ref={scrollRef} />
             </div>
-            <footer className="p-4 bg-slate-900 border-t border-slate-800">
+
+            <footer className="p-4 bg-white border-t border-slate-100">
               {replyTo && (
-                <div className="max-w-4xl mx-auto mb-3 flex items-center justify-between bg-slate-800 p-3 rounded-xl border-l-4 border-blue-500">
-                  <div className="truncate text-xs font-bold text-slate-400">Replying to @{replyTo.senderName}</div>
-                  <button onClick={() => setReplyTo(null)}><XCircle size={16} /></button>
+                <div className="max-w-4xl mx-auto mb-3 flex items-center justify-between bg-blue-50 border border-blue-100 p-3 rounded-xl">
+                  <p className="truncate text-xs font-bold text-blue-700">Replying to message</p>
+                  <button onClick={() => setReplyTo(null)} className="text-blue-300 hover:text-blue-600 transition-colors shrink-0 ml-4"><CheckCircle size={16} /></button>
                 </div>
               )}
               <form onSubmit={handleSendMessage} className="max-w-4xl mx-auto flex gap-2">
-                <input type="text" value={newMessage} onChange={(e) => setNewMessage(e.target.value)} placeholder="Type a message..." className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-5 py-4 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/30" />
-                <button type="submit" disabled={!newMessage.trim()} className="bg-blue-600 text-white p-4 rounded-xl shadow-lg hover:bg-blue-500 transition-all"><Send size={20} /></button>
+                <input 
+                  type="text" 
+                  value={newMessage} 
+                  onChange={(e) => setNewMessage(e.target.value)} 
+                  placeholder="Type a message..." 
+                  className="flex-1 bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 text-sm focus:outline-none focus:border-blue-500 transition-all text-slate-800 shadow-inner" 
+                />
+                <button type="submit" disabled={!newMessage.trim()} className="bg-blue-600 text-white p-4 rounded-2xl shadow-lg shadow-blue-100 hover:bg-blue-700 transition-all disabled:opacity-50">
+                  <Send size={20} />
+                </button>
               </form>
             </footer>
           </>
