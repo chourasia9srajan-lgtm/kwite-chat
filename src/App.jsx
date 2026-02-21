@@ -11,11 +11,13 @@ import {
   doc,
   updateDoc,
   getDoc,
+  setDoc,
   writeBatch
 } from 'firebase/firestore';
 import { 
   getAuth, 
   signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword,
   onAuthStateChanged,
   signOut
 } from 'firebase/auth';
@@ -58,6 +60,7 @@ export default function App() {
   const [passwordInput, setPasswordInput] = useState(''); 
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [isRegistering, setIsRegistering] = useState(false);
 
   const scrollRef = useRef(null);
   const typingTimeoutRef = useRef(null);
@@ -228,16 +231,55 @@ export default function App() {
 
   // --- Event Handlers ---
 
-  const handleLogin = async (e) => {
+  const handleAuth = async (e) => {
     e.preventDefault();
     const cleanName = usernameInput.toLowerCase().trim();
     if (!cleanName || !passwordInput) return setError("Please enter your credentials.");
+    if (passwordInput.length < 6) return setError("Password must be at least 6 characters.");
+    
     setLoading(true);
     setError("");
+
     try {
-      await signInWithEmailAndPassword(auth, toInternalId(cleanName), passwordInput);
+      if (isRegistering) {
+        // Sign up logic
+        const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'all_users', cleanName);
+        const userSnap = await getDoc(userRef);
+        
+        if (userSnap.exists()) {
+          setLoading(false);
+          return setError("This username is already taken.");
+        }
+
+        const isFirstAdmin = cleanName === 'admin';
+        const cred = await createUserWithEmailAndPassword(auth, toInternalId(cleanName), passwordInput);
+        
+        const profileData = {
+          username: usernameInput.trim(),
+          status: isFirstAdmin ? 'approved' : 'pending',
+          uid: cred.user.uid,
+          isAdmin: isFirstAdmin, 
+          lastSeen: serverTimestamp(),
+          typingTo: null,
+          createdAt: new Date().toISOString()
+        };
+
+        // Create the private profile and public record
+        await setDoc(doc(db, 'artifacts', appId, 'users', cred.user.uid, 'profile', 'data'), profileData);
+        await setDoc(userRef, profileData);
+      } else {
+        // Login logic
+        await signInWithEmailAndPassword(auth, toInternalId(cleanName), passwordInput);
+      }
     } catch (err) {
-      setError("Incorrect username or password.");
+      console.error(err);
+      if (err.code === 'auth/wrong-password' || err.code === 'auth/user-not-found') {
+        setError("Invalid username or password.");
+      } else if (err.code === 'auth/email-already-in-use') {
+        setError("Account already exists for this username.");
+      } else {
+        setError(err.message);
+      }
     } finally {
       setLoading(false);
     }
@@ -289,11 +331,13 @@ export default function App() {
             <Lock size={28} />
           </div>
           <h1 className="text-3xl font-black text-slate-900 tracking-tighter uppercase">Kwite Chat</h1>
-          <p className="text-slate-400 text-[10px] font-black uppercase tracking-[0.2em] mt-2 italic">Authorized Link Only</p>
+          <p className="text-slate-400 text-[10px] font-black uppercase tracking-[0.2em] mt-2 italic">
+            {isRegistering ? 'Register New Account' : 'Authorized Access Only'}
+          </p>
         </div>
-        <form onSubmit={handleLogin} className="space-y-4">
+        <form onSubmit={handleAuth} className="space-y-4">
           <div className="space-y-1">
-            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Your Username</label>
+            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Username</label>
             <input 
               type="text" 
               value={usernameInput} 
@@ -314,12 +358,15 @@ export default function App() {
           </div>
           {error && <p className="text-red-500 text-[11px] font-bold bg-red-50 p-4 rounded-xl border border-red-100 leading-tight text-center">{error}</p>}
           <button disabled={loading} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-4 rounded-2xl transition-all shadow-lg shadow-blue-100 uppercase tracking-widest mt-2 active:scale-95">
-            {loading ? 'Authenticating...' : 'Sign In'}
+            {loading ? 'Processing...' : (isRegistering ? 'Create Account' : 'Sign In')}
           </button>
         </form>
-        <p className="mt-12 text-center text-[9px] text-slate-300 font-bold uppercase tracking-widest leading-relaxed">
-          Access is restricted. If you do not have credentials,<br/>please contact your administrator.
-        </p>
+        <button 
+          onClick={() => {setIsRegistering(!isRegistering); setError("");}} 
+          className="w-full mt-8 text-sm text-slate-400 hover:text-blue-600 font-bold uppercase tracking-wider transition-colors"
+        >
+          {isRegistering ? "Already have an account? Sign In" : "Request Access? Create Account"}
+        </button>
       </div>
     </div>
   );
