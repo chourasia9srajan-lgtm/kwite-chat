@@ -23,20 +23,20 @@ import {
 } from 'firebase/auth';
 import { Send, User, ShieldCheck, Clock, CheckCircle, Reply, Check, CheckCheck, LogOut, MessageSquare, UserPlus, Lock } from 'lucide-react';
 
-// --- Firebase Configuration ---
+// --- Updated Firebase Configuration ---
 const firebaseConfig = {
-  apiKey: "AIzaSyDiZJ8_L_qCUYdsTnDNRwOrofuVkWUbml4",
-  authDomain: "kwite-e2c9a.firebaseapp.com",
-  projectId: "kwite-e2c9a",
-  storageBucket: "kwite-e2c9a.firebasestorage.app",
-  messagingSenderId: "297509206721",
-  appId: "1:297509206721:web:a7e386af3542f0a3f37240"
+  apiKey: "AIzaSyDz_DqHlxaqB9uIgO4FDULt5MeZpembTjg",
+  authDomain: "kwitly-76ee9.firebaseapp.com",
+  projectId: "kwitly-76ee9",
+  storageBucket: "kwitly-76ee9.firebasestorage.app",
+  messagingSenderId: "134694524438",
+  appId: "1:134694524438:web:806578717fe17acc05c737"
 };
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = 'kwite-chat-v1';
+const appId = 'kwite-chat-v1'; // Internal data namespace
 
 /**
  * NOTE: Firebase Auth strictly requires an email-like string.
@@ -153,7 +153,8 @@ export default function App() {
             setView('login');
           }
         }, (err) => {
-          setError("Database error. Please log in again.");
+          console.error("Database access denied:", err);
+          setError("Access denied. Please check your Firestore Security Rules.");
           signOut(auth);
         });
       } else {
@@ -242,7 +243,7 @@ export default function App() {
 
     try {
       if (isRegistering) {
-        // Sign up logic
+        // Sign up logic: Username as the Primary Key for the Document
         const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'all_users', cleanName);
         const userSnap = await getDoc(userRef);
         
@@ -273,10 +274,12 @@ export default function App() {
       }
     } catch (err) {
       console.error(err);
-      if (err.code === 'auth/wrong-password' || err.code === 'auth/user-not-found') {
+      if (err.code === 'auth/wrong-password' || err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
         setError("Invalid username or password.");
       } else if (err.code === 'auth/email-already-in-use') {
         setError("Account already exists for this username.");
+      } else if (err.code === 'auth/unauthorized-domain') {
+        setError("Domain not authorized. Add your website URL to Firebase Authorized Domains.");
       } else {
         setError(err.message);
       }
@@ -302,7 +305,7 @@ export default function App() {
         senderName: userProfile.username,
         timestamp: serverTimestamp(),
         read: false,
-        replyTo: replyTo ? { text: replyTo.text, from: replyTo.senderName } : null
+        replyTo: replyTo ? { text: replyTo.text, from: replyTo.from } : null
       });
       setReplyTo(null);
     } catch (e) {}
@@ -319,20 +322,20 @@ export default function App() {
 
   if (view === 'loading') return (
     <div className="h-screen bg-slate-50 flex items-center justify-center text-blue-600 font-bold italic animate-pulse">
-      Loading Session...
+      Connecting to kwitly...
     </div>
   );
 
   if (view === 'login') return (
     <div className="flex items-center justify-center min-h-screen bg-white p-6 font-sans">
-      <div className="w-full max-w-sm">
+      <div className="w-full max-sm:px-4 max-w-sm">
         <div className="text-center mb-10">
           <div className="w-16 h-16 bg-blue-600 rounded-full flex items-center justify-center mx-auto mb-4 shadow-xl shadow-blue-100 text-white">
             <Lock size={28} />
           </div>
-          <h1 className="text-3xl font-black text-slate-900 tracking-tighter uppercase">Kwite Chat</h1>
+          <h1 className="text-3xl font-black text-slate-900 tracking-tighter uppercase">Kwitly Chat</h1>
           <p className="text-slate-400 text-[10px] font-black uppercase tracking-[0.2em] mt-2 italic">
-            {isRegistering ? 'Register New Account' : 'Authorized Access Only'}
+            {isRegistering ? 'New Account Registration' : 'Secure Access Gateway'}
           </p>
         </div>
         <form onSubmit={handleAuth} className="space-y-4">
@@ -365,7 +368,7 @@ export default function App() {
           onClick={() => {setIsRegistering(!isRegistering); setError("");}} 
           className="w-full mt-8 text-sm text-slate-400 hover:text-blue-600 font-bold uppercase tracking-wider transition-colors"
         >
-          {isRegistering ? "Already have an account? Sign In" : "Request Access? Create Account"}
+          {isRegistering ? "Back to Login" : "New User? Request Access"}
         </button>
       </div>
     </div>
@@ -375,9 +378,9 @@ export default function App() {
     <div className="flex items-center justify-center min-h-screen bg-slate-50 p-6 text-center">
       <div className="max-w-xs bg-white p-10 rounded-[32px] border border-slate-200 shadow-sm">
         <Clock className="w-16 h-16 text-amber-500 mx-auto mb-6 animate-pulse" />
-        <h1 className="text-2xl font-black text-slate-900 mb-2 uppercase tracking-tighter">Pending</h1>
+        <h1 className="text-2xl font-black text-slate-900 mb-2 uppercase tracking-tighter">Reviewing Access</h1>
         <p className="text-slate-500 text-xs font-medium leading-relaxed mb-8 italic">
-          @{userProfile?.username}, your credentials are valid, but your access hasn't been enabled by an administrator yet.
+          @{userProfile?.username}, your credentials are valid. Please wait for an administrator to enable your session.
         </p>
         <button onClick={() => signOut(auth)} className="text-slate-400 hover:text-red-500 font-black text-[10px] uppercase tracking-widest transition-colors">Sign Out</button>
       </div>
@@ -393,18 +396,18 @@ export default function App() {
             <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-white ${userProfile?.isAdmin ? 'bg-indigo-600' : 'bg-blue-600'}`}>
               <User size={20} />
             </div>
-            <div>
+            <div className="overflow-hidden">
               <p className="text-sm font-black truncate">@{userProfile?.username}</p>
-              <p className="text-[9px] text-slate-400 font-bold uppercase tracking-tighter">{userProfile?.isAdmin ? 'Global Admin' : 'Secure User'}</p>
+              <p className="text-[9px] text-slate-400 font-bold uppercase tracking-tighter">{userProfile?.isAdmin ? 'Admin' : 'Verified User'}</p>
             </div>
           </div>
-          <button onClick={() => signOut(auth)} className="text-slate-300 hover:text-red-500 transition-colors"><LogOut size={18} /></button>
+          <button onClick={() => signOut(auth)} className="text-slate-300 hover:text-red-500 transition-colors shrink-0"><LogOut size={18} /></button>
         </div>
         
         <div className="flex-1 overflow-y-auto p-4 space-y-6">
           {userProfile?.isAdmin && availableUsers.filter(u => u.status === 'pending').length > 0 && (
             <div>
-              <p className="text-[10px] font-black text-amber-600 uppercase tracking-widest px-2 mb-2">Requests</p>
+              <p className="text-[10px] font-black text-amber-600 uppercase tracking-widest px-2 mb-2">New Requests</p>
               {availableUsers.filter(u => u.status === 'pending').map(u => (
                 <div key={u.uidKey} className="flex items-center justify-between p-3 bg-white border border-slate-200 rounded-xl mb-1 shadow-sm">
                   <p className="text-xs font-bold text-slate-700 truncate">@{u.username}</p>
@@ -417,7 +420,7 @@ export default function App() {
           )}
 
           <div>
-            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-2">Active Sessions</p>
+            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-2">Conversations</p>
             <div className="space-y-1">
               {userProfile?.isAdmin ? (
                 availableUsers.filter(u => u.status === 'approved').map(u => {
@@ -448,7 +451,7 @@ export default function App() {
                   <button className="w-full flex items-center gap-3 p-4 rounded-2xl bg-blue-600 text-white shadow-xl shadow-blue-100">
                     <ShieldCheck size={20} />
                     <div className="text-left">
-                      <p className="font-black text-sm uppercase tracking-tighter">Administrator</p>
+                      <p className="font-black text-sm uppercase tracking-tighter tracking-tight">Support Admin</p>
                       <p className="text-[10px] opacity-80 font-bold tracking-widest">@{targetUserProfile.username}</p>
                     </div>
                   </button>
@@ -464,8 +467,8 @@ export default function App() {
         {!targetUsername ? (
           <div className="flex-1 flex flex-col items-center justify-center text-slate-300 p-10 text-center">
             <MessageSquare size={56} className="opacity-10 mb-6" />
-            <h2 className="text-xl font-black text-slate-400 uppercase tracking-tighter italic">Secure Gateway</h2>
-            <p className="text-[10px] font-bold opacity-60 mt-2 uppercase tracking-[0.2em]">Select a session or press ESC</p>
+            <h2 className="text-xl font-black text-slate-400 uppercase tracking-tighter italic">Kwitly Chat</h2>
+            <p className="text-[10px] font-bold opacity-60 mt-2 uppercase tracking-[0.2em]">Select a session to begin messaging</p>
           </div>
         ) : (
           <>
@@ -511,7 +514,7 @@ export default function App() {
             <footer className="p-6 bg-white border-t border-slate-100 shrink-0">
               {replyTo && (
                 <div className="max-w-4xl mx-auto mb-4 flex items-center justify-between bg-blue-50 border border-blue-100 px-4 py-3 rounded-2xl">
-                    <p className="truncate text-[11px] font-bold text-blue-700 italic">Replying to message...</p>
+                    <p className="truncate text-[11px] font-bold text-blue-700 italic font-medium">Replying...</p>
                     <button onClick={() => setReplyTo(null)} className="text-blue-300 hover:text-blue-600"><CheckCircle size={18} /></button>
                 </div>
               )}
